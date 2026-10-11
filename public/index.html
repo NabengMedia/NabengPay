@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#ff6b00">
+  <meta name="description" content="Nabeng Paystack Mobile Money collection dashboard">
+  <title>Nabeng Pay — MoMo Collection</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="Nabeng Pay home">
+        <span class="brand-mark">N</span>
+        <span><strong>Nabeng Pay</strong><small>MoMo Collection</small></span>
+      </a>
+      <div class="nav-label">WORKSPACE</div>
+      <a class="nav-item active" href="#overview"><span class="nav-icon">▦</span> Overview</a>
+      <a class="nav-item" href="#collect"><span class="nav-icon">＋</span> Collect payment</a>
+      <div class="sidebar-bottom">
+        <div class="secure-dot"></div>
+        <div><strong>Secure connection</strong><small>Payments verified server-side</small></div>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">PAYMENTS WORKSPACE</p>
+          <h1>Overview</h1>
+        </div>
+        <div class="topbar-right"><span class="live-dot"></span><span>System ready</span><span class="avatar">NP</span></div>
+      </header>
+
+      <section class="welcome-panel" id="overview">
+        <div class="welcome-copy">
+          <p class="eyebrow light">NABENG PRINT MEDIA</p>
+          <h2>Simple, secure<br>Mobile Money collection.</h2>
+          <p>Start a payment request and track its verified status in one place.</p>
+          <a class="primary-button" href="#collect">＋ New payment request</a>
+        </div>
+        <div class="welcome-art" aria-hidden="true">
+          <div class="art-circle circle-one"></div><div class="art-circle circle-two"></div>
+          <div class="phone-card"><div class="phone-speaker"></div><div class="phone-check">✓</div><strong>Payment</strong><span>Request sent</span><div class="phone-line"></div><div class="phone-line short"></div></div>
+          <div class="floating-chip">GH₵ <b>MoMo</b></div>
+        </div>
+      </section>
+
+      <section class="stats-grid" aria-label="Payment summary">
+        <article class="stat-card"><div class="stat-top"><span>Total requests</span><span class="stat-icon orange">↗</span></div><strong id="totalCount">0</strong><small>Requests in this session</small></article>
+        <article class="stat-card"><div class="stat-top"><span>Successful</span><span class="stat-icon green">✓</span></div><strong id="successCount">0</strong><small>Verified by Paystack</small></article>
+        <article class="stat-card"><div class="stat-top"><span>Pending</span><span class="stat-icon amber">◷</span></div><strong id="pendingCount">0</strong><small>Awaiting confirmation</small></article>
+      </section>
+
+      <section class="content-grid">
+        <article class="panel payment-panel" id="collect">
+          <div class="panel-heading"><div><p class="eyebrow">NEW COLLECTION</p><h2>Request a payment</h2></div><span class="step-pill">STEP 01</span></div>
+          <p class="muted">Enter the customer's details. They will need to approve the prompt on their phone.</p>
+          <form id="paymentForm">
+            <label for="amount">Amount (GHS)</label>
+            <div class="amount-wrap"><span>GH₵</span><input id="amount" name="amount" type="number" min="1" max="50000" step="0.01" placeholder="0.00" required></div>
+            <div class="form-row">
+              <div><label for="phone">Mobile Money number</label><input id="phone" name="phone" type="tel" autocomplete="tel" placeholder="024 123 4567" required></div>
+              <div><label for="provider">Network</label><select id="provider" name="provider" required><option value="">Select network</option><option value="mtn">MTN Mobile Money</option><option value="vod">Telecel / Vodafone</option><option value="atl">AirtelTigo</option></select></div>
+            </div>
+            <label for="email">Customer email</label><input id="email" name="email" type="email" autocomplete="email" placeholder="customer@example.com" required>
+            <div class="notice"><span class="notice-icon">i</span><span>Payment status changes to successful only after server-side verification. A successful request does not mean the customer has paid yet.</span></div>
+            <button class="primary-button full-button" id="submitButton" type="submit">Send payment request <span>→</span></button>
+          </form>
+          <div class="result-box" id="resultBox" role="status" aria-live="polite" hidden></div>
+        </article>
+
+        <article class="panel history-panel">
+          <div class="panel-heading"><div><p class="eyebrow">RECENT ACTIVITY</p><h2>Latest request</h2></div><span class="history-icon">↻</span></div>
+          <div id="emptyState" class="empty-state"><div class="empty-icon">₵</div><strong>No payment request yet</strong><p>Your latest payment request and its status will appear here.</p></div>
+          <div id="latestPayment" class="latest-payment" hidden></div>
+          <div class="history-foot"><span class="secure-icon">✓</span> Status is checked against Paystack</div>
+        </article>
+      </section>
+
+      <footer><span>© <span id="year"></span> Nabeng Pay</span><span>Works Beyond Quality <i>•</i> Secure MoMo collection</span></footer>
+    </main>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
