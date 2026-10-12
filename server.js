@@ -140,7 +140,7 @@ async function paystack(path, method = 'GET', body) {
 
   let response;
   try {
-    response = await fetch(`https://api.paystack.co${path}`, {
+    response = await fetch(`https://nabengpay-1.onrender.com/api/paystack-webhook${path}`, {
       method,
       headers: {
         Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
