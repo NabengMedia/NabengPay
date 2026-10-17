@@ -48,7 +48,7 @@ const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
 
 const PORT = Number(process.env.PORT || 3000);
 const MAX_AMOUNT_GHS = 50000;
-const PAYSTACK_TIMEOUT_MS = 15000;
+const PAYSTACK_TIMEOUT_MS = 25000;
 const TERMINAL_FAILURE_STATUSES = new Set(['failed', 'abandoned', 'reversed']);
 
 // -----------------------------------------------------------------------------
@@ -140,7 +140,7 @@ async function paystack(path, method = 'GET', body) {
 
   let response;
   try {
-    response = await fetch(`https://nabengpay-1.onrender.com/api/paystack-webhook${path}`, {
+    response = await fetch(`https://api.paystack.co${path}`, {
       method,
       headers: {
         Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
@@ -354,15 +354,20 @@ app.post('/api/charge', chargeLimit, async (req, res) => {
     return res.status(202).json({
       reference,
       status: 'pending',
-      message: result.message || 'Payment request initiated. Complete any instructions from your mobile network.',
+      message: result.message || 'Payment request initiated. Check your phone and complete the mobile-money authorization.',
       displayText: result.data?.display_text || '',
-      providerStatus
+      providerStatus,
+      nextAction: result.data?.status || 'pending',
+      customerMessage: result.data?.display_text ||
+        'If no prompt appears, wait briefly and check the payment status before trying again.'
     });
   } catch (error) {
-    console.error('Charge error:', error.message);
-    if (error.paystackDetails) {
-      console.error('Paystack response details:', JSON.stringify(error.paystackDetails, null, 2));
-    }
+    console.error('Charge initiation failed:', {
+      message: error.message,
+      isNetworkError: Boolean(error.isNetworkError),
+      paystackDetails: error.paystackDetails || null,
+      reference: reference || null
+    });
 
     // Keep uncertain requests pending: a timeout/network error may occur after
     // Paystack received the request. Do not claim payment failed or succeeded.
