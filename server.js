@@ -457,6 +457,123 @@ app.post('/api/submit-otp', chargeLimit, async (req, res) => {
   }
 });
 
+
+const listLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 60,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Too many list requests. Please wait and try again.' }
+});
+
+// List / search payments (history)
+app.get('/api/payments', listLimit, async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const status = String(req.query.status || '').trim().toLowerCase();
+    const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
+
+    let query = db
+      .from('momo_payments')
+      .select('reference, customer_email, customer_phone, provider, amount_pesewas, currency, status, created_at, paid_at, provider_status')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (status && ['success', 'pending', 'failed', 'abandoned', 'reversed', 'cancelled', 'verification_mismatch'].includes(status)) {
+      query = query.eq('status', status);
+    }
+
+    if (q) {
+      const digits = q.replace(/\D/g, '');
+      // Search reference, phone, or email using or-filter
+      if (q.toUpperCase().startsWith('NPM-') || q.includes('-')) {
+        query = query.ilike('reference', `%${q}%`);
+      } else if (digits.length >= 4 && digits.length === q.replace(/\s/g, '').length) {
+        query = query.ilike('customer_phone', `%${digits}%`);
+      } else if (q.includes('@')) {
+        query = query.ilike('customer_email', `%${q}%`);
+      } else {
+        // Broad search across phone and reference
+        query = query.or(`reference.ilike.%${q}%,customer_phone.ilike.%${q}%,customer_email.ilike.%${q}%`);
+      }
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    const payments = (data || []).map((row) => ({
+      reference: row.reference,
+      email: row.customer_email,
+      phone: row.customer_phone,
+      provider: row.provider,
+      amount_pesewas: row.amount_pesewas,
+      amount: (Number(row.amount_pesewas) / 100).toFixed(2),
+      currency: row.currency || 'GHS',
+      status: row.status,
+      created_at: row.created_at,
+      paid_at: row.paid_at || null,
+      provider_status: row.provider_status || null
+    }));
+
+    return res.json({ payments, count: payments.length });
+  } catch (error) {
+    console.error('List payments error:', error.message);
+    return res.status(500).json({ error: 'Unable to load payment history right now.' });
+  }
+});
+
+// Today's totals (Ghana local day approximated via UTC+0 window; adjust if needed)
+app.get('/api/stats/today', listLimit, async (req, res) => {
+  try {
+    // Ghana is UTC+0 — use calendar day in UTC
+    const now = new Date();
+    const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const startIso = start.toISOString();
+
+    const { data, error } = await db
+      .from('momo_payments')
+      .select('status, amount_pesewas')
+      .gte('created_at', startIso);
+
+    if (error) throw error;
+
+    const rows = data || [];
+    let successCount = 0;
+    let pendingCount = 0;
+    let failedCount = 0;
+    let successPesewas = 0;
+    let pendingPesewas = 0;
+
+    for (const row of rows) {
+      const status = String(row.status || '').toLowerCase();
+      const amount = Number(row.amount_pesewas) || 0;
+      if (status === 'success') {
+        successCount += 1;
+        successPesewas += amount;
+      } else if (status === 'pending' || status === 'verification_mismatch') {
+        pendingCount += 1;
+        pendingPesewas += amount;
+      } else {
+        failedCount += 1;
+      }
+    }
+
+    return res.json({
+      date: startIso.slice(0, 10),
+      totalRequests: rows.length,
+      successCount,
+      pendingCount,
+      failedCount,
+      successAmount: (successPesewas / 100).toFixed(2),
+      pendingAmount: (pendingPesewas / 100).toFixed(2),
+      currency: 'GHS'
+    });
+  } catch (error) {
+    console.error('Today stats error:', error.message);
+    return res.status(500).json({ error: 'Unable to load today\'s totals right now.' });
+  }
+});
+
 app.get('/api/payment/:reference', statusLimit, async (req, res) => {
   try {
     const reference = String(req.params.reference || '');

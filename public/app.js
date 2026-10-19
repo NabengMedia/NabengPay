@@ -14,6 +14,13 @@
   const otpSection = byId("otpSection");
   const otpInput = byId("otpInput");
   const submitOtpButton = byId("submitOtpButton");
+  const historyBody = byId("historyBody");
+  const historySearch = byId("historySearch");
+  const historyStatus = byId("historyStatus");
+  const historyRefresh = byId("historyRefresh");
+  const todayAmount = byId("todayAmount");
+  const todaySuccess = byId("todaySuccess");
+  const todayMeta = byId("todayMeta");
 
   if (!form || !submitButton || !resultBox || !emptyState || !latestPayment) {
     console.error(
@@ -28,10 +35,11 @@
   let activeReference = null;
   let activePhone = "";
   let activeProvider = "";
-  let waitingForOtp = false; // keeps OTP box visible until code is submitted or payment succeeds
+  let waitingForOtp = false;
   let otpHintMessage = "";
   let pollTimer = null;
   let pollInProgress = false;
+  let historyTimer = null;
   const countedSuccess = new Set();
   const countedFinal = new Set();
 
@@ -117,10 +125,7 @@
     if (hint) otpHintMessage = hint;
     if (!otpSection) return;
     otpSection.hidden = false;
-    if (otpInput) {
-      // Do not clear a value the user may already have typed.
-      otpInput.focus();
-    }
+    if (otpInput) otpInput.focus();
   }
 
   function hideOtpSection() {
@@ -196,6 +201,163 @@
     updateStats();
   }
 
+  async function loadTodayStats() {
+    if (!todayAmount) return;
+    try {
+      const data = await apiRequest("/api/stats/today");
+      todayAmount.textContent = Number(data.successAmount || 0).toFixed(2);
+      if (todaySuccess) todaySuccess.textContent = String(data.successCount || 0);
+      if (todayMeta) {
+        todayMeta.textContent = `${data.totalRequests || 0} requests · ${data.pendingCount || 0} pending`;
+      }
+    } catch (error) {
+      console.warn("Today stats unavailable:", error.message);
+    }
+  }
+
+  function scheduleHistoryLoad(delayMs = 250) {
+    if (historyTimer) clearTimeout(historyTimer);
+    historyTimer = setTimeout(() => {
+      loadHistory().catch((err) => console.warn("History load failed:", err.message));
+    }, delayMs);
+  }
+
+  async function loadHistory() {
+    if (!historyBody) return;
+
+    const q = historySearch ? historySearch.value.trim() : "";
+    const status = historyStatus ? historyStatus.value : "";
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (status) params.set("status", status);
+    params.set("limit", "40");
+
+    try {
+      const data = await apiRequest(`/api/payments?${params.toString()}`);
+      const payments = data.payments || [];
+
+      historyBody.replaceChildren();
+
+      if (!payments.length) {
+        const row = document.createElement("tr");
+        row.className = "history-empty-row";
+        const cell = document.createElement("td");
+        cell.colSpan = 7;
+        cell.textContent = q || status ? "No payments match your search." : "No payments yet.";
+        row.appendChild(cell);
+        historyBody.appendChild(row);
+        return;
+      }
+
+      for (const payment of payments) {
+        historyBody.appendChild(buildHistoryRow(payment));
+      }
+    } catch (error) {
+      historyBody.replaceChildren();
+      const row = document.createElement("tr");
+      row.className = "history-empty-row";
+      const cell = document.createElement("td");
+      cell.colSpan = 7;
+      cell.textContent = `Could not load history: ${error.message}`;
+      row.appendChild(cell);
+      historyBody.appendChild(row);
+    }
+  }
+
+  function buildHistoryRow(payment) {
+    const tr = document.createElement("tr");
+    const status = String(payment.status || "pending").toLowerCase();
+    const when = payment.created_at
+      ? new Date(payment.created_at).toLocaleString()
+      : "—";
+
+    const cells = [
+      when,
+      `GH₵ ${formatAmount(payment)}`,
+      payment.phone || "—",
+      providerName(payment.provider),
+      null, // status badge
+      payment.reference || "—",
+      null // actions
+    ];
+
+    cells.forEach((value, index) => {
+      const td = document.createElement("td");
+      if (index === 4) {
+        const badge = document.createElement("span");
+        badge.className = `history-status ${status}`;
+        badge.textContent = status.replaceAll("_", " ");
+        td.appendChild(badge);
+      } else if (index === 5) {
+        const ref = document.createElement("div");
+        ref.className = "history-ref";
+        ref.title = payment.reference || "";
+        ref.textContent = payment.reference || "—";
+        td.appendChild(ref);
+      } else if (index === 6) {
+        const actions = document.createElement("div");
+        actions.className = "history-actions";
+
+        const copyBtn = document.createElement("button");
+        copyBtn.type = "button";
+        copyBtn.className = "mini-btn";
+        copyBtn.textContent = "Copy";
+        copyBtn.title = "Copy reference";
+        copyBtn.addEventListener("click", async () => {
+          try {
+            await navigator.clipboard.writeText(payment.reference || "");
+            copyBtn.textContent = "Copied";
+            setTimeout(() => {
+              copyBtn.textContent = "Copy";
+            }, 1200);
+          } catch {
+            copyBtn.textContent = "Fail";
+            setTimeout(() => {
+              copyBtn.textContent = "Copy";
+            }, 1200);
+          }
+        });
+
+        const checkBtn = document.createElement("button");
+        checkBtn.type = "button";
+        checkBtn.className = "mini-btn";
+        checkBtn.textContent = "Check";
+        checkBtn.title = "Refresh status from Paystack";
+        checkBtn.addEventListener("click", async () => {
+          checkBtn.disabled = true;
+          checkBtn.textContent = "…";
+          try {
+            await checkPayment(
+              payment.reference,
+              payment.phone || "",
+              payment.provider || ""
+            );
+            scheduleHistoryLoad(100);
+            loadTodayStats();
+          } catch (error) {
+            setResult(`Status check failed: ${error.message}`, "error");
+          } finally {
+            checkBtn.disabled = false;
+            checkBtn.textContent = "Check";
+          }
+        });
+
+        actions.append(copyBtn, checkBtn);
+        td.appendChild(actions);
+      } else if (index === 3) {
+        const tag = document.createElement("span");
+        tag.className = "provider-tag";
+        tag.textContent = value;
+        td.appendChild(tag);
+      } else {
+        td.textContent = value;
+      }
+      tr.appendChild(td);
+    });
+
+    return tr;
+  }
+
   async function checkPayment(reference, phone, provider) {
     const data = await apiRequest(
       `/api/payment/${encodeURIComponent(reference)}`
@@ -206,16 +368,12 @@
 
     const status = String(data.status || "pending").toLowerCase();
 
-    // While we are waiting for the customer OTP, never hide the OTP box
-    // and never treat abandoned/failed as final — Paystack often marks
-    // the charge abandoned if the code is not submitted quickly.
     if (waitingForOtp && status !== "success") {
       setResult(
         otpHintMessage ||
           "An OTP was sent to the customer's phone. Enter the code below to complete the payment.",
         "pending"
       );
-      // Ensure the section stays visible (in case something else toggled it).
       if (otpSection) otpSection.hidden = false;
       return false;
     }
@@ -229,11 +387,14 @@
           `Payment verified successfully by Paystack. Reference: ${reference}`,
           "success"
         );
+        loadTodayStats();
+        scheduleHistoryLoad(200);
       } else {
         setResult(
           `Paystack reports this payment as ${status}. Check the transaction before making another charge. Reference: ${reference}`,
           "error"
         );
+        scheduleHistoryLoad(200);
       }
       return true;
     }
@@ -259,7 +420,6 @@
     activePhone = phone;
     activeProvider = provider;
     const startedAt = Date.now();
-    // Allow more time when an OTP must be collected manually.
     const maxDurationMs = waitingForOtp ? 10 * 60 * 1000 : 4 * 60 * 1000;
 
     const poll = async () => {
@@ -289,8 +449,6 @@
           return;
         }
       } catch (error) {
-        // A status-check error is not evidence that the payment failed.
-        // Keep the OTP box if we are waiting for a code.
         if (waitingForOtp) {
           setResult(
             otpHintMessage ||
@@ -309,13 +467,11 @@
       }
 
       if (activeReference === reference) {
-        // Poll a bit less aggressively while waiting for OTP so the box is not disruptive.
         const delay = waitingForOtp ? 8000 : 5000;
         pollTimer = setTimeout(poll, delay);
       }
     };
 
-    // First poll after a short delay so the OTP box has time to appear and stay.
     pollTimer = setTimeout(poll, waitingForOtp ? 6000 : 3000);
   }
 
@@ -326,8 +482,6 @@
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-
-    // Prevent accidental double-clicks and overlapping charge requests.
     if (submitButton.disabled) return;
 
     stopPolling();
@@ -408,8 +562,9 @@
       }
 
       form.reset();
-      // startPolling reads waitingForOtp, so call it after showOtpSection.
       startPolling(reference, phone, provider);
+      scheduleHistoryLoad(400);
+      loadTodayStats();
     } catch (error) {
       const responseData = error.data || {};
       const reference = responseData.reference;
@@ -436,6 +591,7 @@
           "pending"
         );
         startPolling(reference, phone, provider);
+        scheduleHistoryLoad(400);
       } else {
         setResult(
           `${error.message} No payment reference was returned, so this page cannot confirm whether Paystack received the request. Check Render logs and Paystack transactions before trying again.`,
@@ -501,8 +657,9 @@
             activePhone,
             providerName(activeProvider)
           );
+          loadTodayStats();
+          scheduleHistoryLoad(200);
         } else if (isFinalStatus(status) && status !== "abandoned") {
-          // Treat hard failures as final, but keep OTP box on abandoned so user can retry code.
           markFinalOnce(reference, status);
           hideOtpSection();
           stopPolling();
@@ -510,22 +667,18 @@
             `Paystack reports this payment as ${status}. Reference: ${reference}`,
             "error"
           );
+          scheduleHistoryLoad(200);
         } else {
-          // Still pending after OTP submit — keep the box in case they need to try again,
-          // but clear waiting flag only on clear success above.
           setResult(
             data.displayText ||
               data.message ||
               "OTP submitted. Waiting for confirmation from Paystack…",
             "pending"
           );
-          // Soft-clear waiting so normal poll messages can show, but leave the box visible
-          // in case a second attempt is needed.
           if (otpSection) otpSection.hidden = false;
           startPolling(reference, activePhone, activeProvider);
         }
       } catch (error) {
-        // Keep the OTP box open so the user can correct a wrong code.
         setResult(`OTP submission failed: ${error.message}. You can try the code again.`, "error");
         if (otpSection) otpSection.hidden = false;
         waitingForOtp = true;
@@ -536,7 +689,6 @@
     });
   }
 
-  // Allow Enter key inside the OTP field to submit.
   if (otpInput) {
     otpInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
@@ -548,7 +700,26 @@
     });
   }
 
+  if (historySearch) {
+    historySearch.addEventListener("input", () => scheduleHistoryLoad(300));
+  }
+  if (historyStatus) {
+    historyStatus.addEventListener("change", () => scheduleHistoryLoad(50));
+  }
+  if (historyRefresh) {
+    historyRefresh.addEventListener("click", () => {
+      scheduleHistoryLoad(0);
+      loadTodayStats();
+    });
+  }
+
+  // Initial load
+  updateStats();
+  loadTodayStats();
+  scheduleHistoryLoad(0);
+
   window.addEventListener("beforeunload", () => {
     if (pollTimer) clearTimeout(pollTimer);
+    if (historyTimer) clearTimeout(historyTimer);
   });
 })();
