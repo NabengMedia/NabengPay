@@ -11,6 +11,9 @@
   const resultBox = byId("resultBox");
   const emptyState = byId("emptyState");
   const latestPayment = byId("latestPayment");
+  const otpSection = byId("otpSection");
+  const otpInput = byId("otpInput");
+  const submitOtpButton = byId("submitOtpButton");
 
   if (!form || !submitButton || !resultBox || !emptyState || !latestPayment) {
     console.error(
@@ -23,6 +26,10 @@
   let successfulCount = 0;
   let pendingCount = 0;
   let activeReference = null;
+  let activePhone = "";
+  let activeProvider = "";
+  let waitingForOtp = false; // keeps OTP box visible until code is submitted or payment succeeds
+  let otpHintMessage = "";
   let pollTimer = null;
   let pollInProgress = false;
   const countedSuccess = new Set();
@@ -105,6 +112,25 @@
     );
   }
 
+  function showOtpSection(hint) {
+    waitingForOtp = true;
+    if (hint) otpHintMessage = hint;
+    if (!otpSection) return;
+    otpSection.hidden = false;
+    if (otpInput) {
+      // Do not clear a value the user may already have typed.
+      otpInput.focus();
+    }
+  }
+
+  function hideOtpSection() {
+    waitingForOtp = false;
+    otpHintMessage = "";
+    if (!otpSection) return;
+    otpSection.hidden = true;
+    if (otpInput) otpInput.value = "";
+  }
+
   async function readJson(response) {
     const text = await response.text();
     if (!text) return {};
@@ -179,8 +205,24 @@
     renderPayment(payment, phone, providerName(provider));
 
     const status = String(data.status || "pending").toLowerCase();
+
+    // While we are waiting for the customer OTP, never hide the OTP box
+    // and never treat abandoned/failed as final — Paystack often marks
+    // the charge abandoned if the code is not submitted quickly.
+    if (waitingForOtp && status !== "success") {
+      setResult(
+        otpHintMessage ||
+          "An OTP was sent to the customer's phone. Enter the code below to complete the payment.",
+        "pending"
+      );
+      // Ensure the section stays visible (in case something else toggled it).
+      if (otpSection) otpSection.hidden = false;
+      return false;
+    }
+
     if (isFinalStatus(status)) {
       markFinalOnce(reference, status);
+      hideOtpSection();
 
       if (status === "success") {
         setResult(
@@ -214,16 +256,27 @@
   function startPolling(reference, phone, provider) {
     stopPolling();
     activeReference = reference;
+    activePhone = phone;
+    activeProvider = provider;
     const startedAt = Date.now();
-    const maxDurationMs = 4 * 60 * 1000;
+    // Allow more time when an OTP must be collected manually.
+    const maxDurationMs = waitingForOtp ? 10 * 60 * 1000 : 4 * 60 * 1000;
 
     const poll = async () => {
       if (activeReference !== reference || pollInProgress) return;
       if (Date.now() - startedAt >= maxDurationMs) {
-        setResult(
-          `The payment is still unconfirmed. Do not charge again yet. Check Paystack and verify reference ${reference} before taking further action.`,
-          "pending"
-        );
+        if (waitingForOtp) {
+          setResult(
+            `Still waiting for the OTP. Enter the code from the customer's SMS below, or check Paystack for reference ${reference}.`,
+            "pending"
+          );
+          if (otpSection) otpSection.hidden = false;
+        } else {
+          setResult(
+            `The payment is still unconfirmed. Do not charge again yet. Check Paystack and verify reference ${reference} before taking further action.`,
+            "pending"
+          );
+        }
         stopPolling();
         return;
       }
@@ -237,20 +290,33 @@
         }
       } catch (error) {
         // A status-check error is not evidence that the payment failed.
-        setResult(
-          `The payment outcome is not confirmed yet. Status check failed: ${error.message} Do not retry the charge. Reference: ${reference}`,
-          "pending"
-        );
+        // Keep the OTP box if we are waiting for a code.
+        if (waitingForOtp) {
+          setResult(
+            otpHintMessage ||
+              `Status check failed (${error.message}). You can still enter the OTP below. Reference: ${reference}`,
+            "pending"
+          );
+          if (otpSection) otpSection.hidden = false;
+        } else {
+          setResult(
+            `The payment outcome is not confirmed yet. Status check failed: ${error.message} Do not retry the charge. Reference: ${reference}`,
+            "pending"
+          );
+        }
       } finally {
         pollInProgress = false;
       }
 
       if (activeReference === reference) {
-        pollTimer = setTimeout(poll, 5000);
+        // Poll a bit less aggressively while waiting for OTP so the box is not disruptive.
+        const delay = waitingForOtp ? 8000 : 5000;
+        pollTimer = setTimeout(poll, delay);
       }
     };
 
-    pollTimer = setTimeout(poll, 3000);
+    // First poll after a short delay so the OTP box has time to appear and stay.
+    pollTimer = setTimeout(poll, waitingForOtp ? 6000 : 3000);
   }
 
   function getFormValue(name) {
@@ -265,6 +331,7 @@
     if (submitButton.disabled) return;
 
     stopPolling();
+    hideOtpSection();
     submitButton.disabled = true;
     const originalButtonText = submitButton.textContent;
     submitButton.textContent = "Sending request…";
@@ -298,7 +365,6 @@
 
       const reference = data.reference;
       if (!reference) {
-        // A success-shaped response without a reference cannot be safely polled.
         setResult(
           "The server did not return a payment reference. Check Render logs before attempting another charge.",
           "error"
@@ -309,6 +375,10 @@
       requestCount += 1;
       pendingCount += 1;
       updateStats();
+
+      activeReference = reference;
+      activePhone = phone;
+      activeProvider = provider;
 
       renderPayment(
         {
@@ -321,23 +391,36 @@
         providerName(provider)
       );
 
-      setResult(
-        `${data.displayText ? `${data.displayText} ` : `Payment request submitted for ${phone}. `}Keep this reference for checking the result: ${reference}. Do not submit another charge until this one is resolved.`,
-        "pending"
-      );
+      const needsOtp = Boolean(data.needsOtp || data.nextAction === "send_otp");
+
+      if (needsOtp) {
+        const hint =
+          data.displayText ||
+          data.customerMessage ||
+          "An OTP was sent to the customer's phone. Enter the code below to complete the payment.";
+        setResult(hint, "pending");
+        showOtpSection(hint);
+      } else {
+        setResult(
+          `${data.displayText ? `${data.displayText} ` : `Payment request submitted for ${phone}. `}Keep this reference for checking the result: ${reference}. Do not submit another charge until this one is resolved.`,
+          "pending"
+        );
+      }
 
       form.reset();
+      // startPolling reads waitingForOtp, so call it after showOtpSection.
       startPolling(reference, phone, provider);
     } catch (error) {
       const responseData = error.data || {};
       const reference = responseData.reference;
 
       if (reference) {
-        // Server may have contacted Paystack before returning an error.
         requestCount += 1;
         pendingCount += 1;
         updateStats();
         activeReference = reference;
+        activePhone = phone;
+        activeProvider = provider;
         renderPayment(
           {
             reference,
@@ -370,8 +453,101 @@
     }
   });
 
-  // If the page already has a payment reference supplied by a previous server
-  // response, expose a safe manual status check without creating another charge.
+  if (submitOtpButton) {
+    submitOtpButton.addEventListener("click", async () => {
+      const reference = activeReference;
+      const otp = (otpInput && otpInput.value ? otpInput.value : "").trim();
+
+      if (!reference) {
+        setResult("No active payment to submit OTP for.", "error");
+        return;
+      }
+      if (!/^\d{4,8}$/.test(otp)) {
+        setResult(
+          "Enter the numeric OTP the customer received (usually 6 digits).",
+          "error"
+        );
+        return;
+      }
+
+      submitOtpButton.disabled = true;
+      const originalText = submitOtpButton.textContent;
+      submitOtpButton.textContent = "Submitting…";
+
+      try {
+        const data = await apiRequest("/api/submit-otp", {
+          method: "POST",
+          body: JSON.stringify({ reference, otp })
+        });
+
+        const status = String(data.status || "pending").toLowerCase();
+
+        if (status === "success") {
+          markFinalOnce(reference, "success");
+          hideOtpSection();
+          stopPolling();
+          setResult(
+            `Payment verified successfully. Reference: ${reference}`,
+            "success"
+          );
+          renderPayment(
+            {
+              reference,
+              amount: data.amount,
+              amount_pesewas: data.amount_pesewas,
+              status: "success",
+              created_at: new Date().toISOString()
+            },
+            activePhone,
+            providerName(activeProvider)
+          );
+        } else if (isFinalStatus(status) && status !== "abandoned") {
+          // Treat hard failures as final, but keep OTP box on abandoned so user can retry code.
+          markFinalOnce(reference, status);
+          hideOtpSection();
+          stopPolling();
+          setResult(
+            `Paystack reports this payment as ${status}. Reference: ${reference}`,
+            "error"
+          );
+        } else {
+          // Still pending after OTP submit — keep the box in case they need to try again,
+          // but clear waiting flag only on clear success above.
+          setResult(
+            data.displayText ||
+              data.message ||
+              "OTP submitted. Waiting for confirmation from Paystack…",
+            "pending"
+          );
+          // Soft-clear waiting so normal poll messages can show, but leave the box visible
+          // in case a second attempt is needed.
+          if (otpSection) otpSection.hidden = false;
+          startPolling(reference, activePhone, activeProvider);
+        }
+      } catch (error) {
+        // Keep the OTP box open so the user can correct a wrong code.
+        setResult(`OTP submission failed: ${error.message}. You can try the code again.`, "error");
+        if (otpSection) otpSection.hidden = false;
+        waitingForOtp = true;
+      } finally {
+        submitOtpButton.disabled = false;
+        submitOtpButton.textContent = originalText || "Submit OTP";
+      }
+    });
+  }
+
+  // Allow Enter key inside the OTP field to submit.
+  if (otpInput) {
+    otpInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        if (submitOtpButton && !submitOtpButton.disabled) {
+          submitOtpButton.click();
+        }
+      }
+    });
+  }
+
   window.addEventListener("beforeunload", () => {
     if (pollTimer) clearTimeout(pollTimer);
   });

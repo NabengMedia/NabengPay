@@ -350,16 +350,22 @@ app.post('/api/charge', chargeLimit, async (req, res) => {
     const providerStatus = result.data?.status || 'pending';
     await saveStatus(reference, { provider_status: providerStatus });
 
-    // A charge-initiation response is not proof that payment succeeded.
+    // When Paystack returns send_otp the customer receives an SMS code that
+    // must be collected and submitted via /charge/submit_otp.
+    const needsOtp = providerStatus === 'send_otp';
+
     return res.status(202).json({
       reference,
       status: 'pending',
+      needsOtp,
       message: result.message || 'Payment request initiated. Check your phone and complete the mobile-money authorization.',
       displayText: result.data?.display_text || '',
       providerStatus,
-      nextAction: result.data?.status || 'pending',
+      nextAction: providerStatus,
       customerMessage: result.data?.display_text ||
-        'If no prompt appears, wait briefly and check the payment status before trying again.'
+        (needsOtp
+          ? 'An OTP has been sent to the customer. Enter the code below to complete the payment.'
+          : 'If no prompt appears, wait briefly and check the payment status before trying again.')
     });
   } catch (error) {
     console.error('Charge initiation failed:', {
@@ -386,6 +392,67 @@ app.post('/api/charge', chargeLimit, async (req, res) => {
     return res.status(502).json({
       error: 'Payment request could not be confirmed. Check the payment status before attempting another charge.',
       reference: reference || undefined
+    });
+  }
+});
+
+// Submit the OTP the customer received by SMS (required when status is send_otp).
+app.post('/api/submit-otp', chargeLimit, async (req, res) => {
+  try {
+    const reference = String(req.body?.reference || '').trim();
+    const otp = String(req.body?.otp || '').trim();
+
+    if (!/^NPM-[a-f0-9-]{36}$/i.test(reference)) {
+      return res.status(400).json({ error: 'Invalid payment reference.' });
+    }
+    if (!/^\d{4,8}$/.test(otp)) {
+      return res.status(400).json({ error: 'Enter a valid OTP (usually 6 digits).' });
+    }
+
+    const payment = await getPayment(reference);
+    if (!payment) {
+      return res.status(404).json({ error: 'Payment not found.' });
+    }
+    if (payment.status === 'success') {
+      return res.json({
+        reference,
+        status: 'success',
+        message: 'Payment already verified.'
+      });
+    }
+
+    const result = await paystack('/charge/submit_otp', 'POST', {
+      otp,
+      reference
+    });
+
+    const providerStatus = result.data?.status || 'pending';
+    await saveStatus(reference, { provider_status: providerStatus });
+
+    let finalStatus = 'pending';
+    try {
+      finalStatus = await verifyPayment(reference);
+    } catch (verificationError) {
+      console.warn('Post-OTP verification is not complete yet:', verificationError.message);
+    }
+
+    return res.json({
+      reference,
+      status: finalStatus,
+      providerStatus,
+      message: result.message || 'OTP submitted.',
+      displayText: result.data?.display_text || ''
+    });
+  } catch (error) {
+    console.error('Submit OTP failed:', {
+      message: error.message,
+      paystackDetails: error.paystackDetails || null,
+      reference: req.body?.reference || null
+    });
+
+    return res.status(502).json({
+      error: error.message || 'Could not submit OTP. Check the code and try again.',
+      reference: req.body?.reference || undefined
     });
   }
 });
