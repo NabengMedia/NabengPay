@@ -14,6 +14,8 @@ const {
   PAYSTACK_SECRET_KEY,
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
+  INVOICE_SUPABASE_URL,
+  INVOICE_SUPABASE_SERVICE_ROLE_KEY,
   DASHBOARD_USER,
   DASHBOARD_PASSWORD
 } = process.env;
@@ -23,6 +25,8 @@ const requiredEnv = {
   PAYSTACK_SECRET_KEY,
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
+  INVOICE_SUPABASE_URL,
+  INVOICE_SUPABASE_SERVICE_ROLE_KEY,
   DASHBOARD_USER,
   DASHBOARD_PASSWORD
 };
@@ -39,7 +43,16 @@ if (!/^sk_(test|live)_/.test(PAYSTACK_SECRET_KEY)) {
   throw new Error('PAYSTACK_SECRET_KEY must be a Paystack secret key (sk_test_... or sk_live_...).');
 }
 
+// NabengPay (MoMo collection) database
 const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false
+  }
+});
+
+// Nabeng Invoice database (separate Supabase project)
+const invoiceDb = createClient(INVOICE_SUPABASE_URL, INVOICE_SUPABASE_SERVICE_ROLE_KEY, {
   auth: {
     persistSession: false,
     autoRefreshToken: false
@@ -56,7 +69,7 @@ const TERMINAL_FAILURE_STATUSES = new Set(['failed', 'abandoned', 'reversed']);
 // -----------------------------------------------------------------------------
 
 app.disable('x-powered-by');
-app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? 1 : false);
+app.set('trust proxy', 1); // always trust the first proxy (Render)
 
 app.use(helmet({ contentSecurityPolicy: true }));
 
@@ -69,7 +82,6 @@ app.use(express.json({
 }));
 
 function constantTimeStringEqual(a, b) {
-  // Hashing makes both inputs the same length before timingSafeEqual.
   const left = crypto.createHash('sha256').update(String(a)).digest();
   const right = crypto.createHash('sha256').update(String(b)).digest();
   return crypto.timingSafeEqual(left, right);
@@ -111,7 +123,6 @@ app.use((req, res, next) => {
   return next();
 });
 
-// Keep the original public dashboard directory and index route.
 app.use(express.static('public', { index: 'index.html', dotfiles: 'deny' }));
 
 const chargeLimit = rateLimit({
@@ -172,7 +183,6 @@ async function paystack(path, method = 'GET', body) {
 
   if (!response.ok || result.status !== true) {
     const error = new Error(result.message || `Paystack request failed (HTTP ${response.status}).`);
-    // Log only diagnostic fields; never log keys or authorization headers.
     error.paystackDetails = {
       httpStatus: response.status,
       message: result.message || null,
@@ -202,7 +212,6 @@ function normalisePhone(input) {
 
 function normaliseProvider(input) {
   const provider = String(input || '').trim().toLowerCase();
-  // Keep the provider codes used by the existing dashboard and Paystack API.
   const aliases = {
     mtn: 'mtn',
     atl: 'atl',
@@ -235,8 +244,6 @@ async function saveStatus(reference, updates) {
   const payload = { ...updates, updated_at: new Date().toISOString() };
   let query = db.from('momo_payments').update(payload).eq('reference', reference);
 
-  // Never downgrade a previously verified success to pending/failed due to a
-  // delayed webhook or a concurrent status poll. A later verified success is allowed.
   if (updates.status !== 'success') query = query.neq('status', 'success');
 
   const { error } = await query;
@@ -296,7 +303,7 @@ async function verifyPayment(reference) {
 }
 
 // -----------------------------------------------------------------------------
-// Routes (existing paths preserved)
+// Routes
 // -----------------------------------------------------------------------------
 
 app.get('/api/health', (req, res) => {
@@ -350,8 +357,6 @@ app.post('/api/charge', chargeLimit, async (req, res) => {
     const providerStatus = result.data?.status || 'pending';
     await saveStatus(reference, { provider_status: providerStatus });
 
-    // When Paystack returns send_otp the customer receives an SMS code that
-    // must be collected and submitted via /charge/submit_otp.
     const needsOtp = providerStatus === 'send_otp';
 
     return res.status(202).json({
@@ -375,8 +380,6 @@ app.post('/api/charge', chargeLimit, async (req, res) => {
       reference: reference || null
     });
 
-    // Keep uncertain requests pending: a timeout/network error may occur after
-    // Paystack received the request. Do not claim payment failed or succeeded.
     if (reference) {
       try {
         await saveStatus(reference, {
@@ -396,7 +399,6 @@ app.post('/api/charge', chargeLimit, async (req, res) => {
   }
 });
 
-// Submit the OTP the customer received by SMS (required when status is send_otp).
 app.post('/api/submit-otp', chargeLimit, async (req, res) => {
   try {
     const reference = String(req.body?.reference || '').trim();
@@ -457,7 +459,6 @@ app.post('/api/submit-otp', chargeLimit, async (req, res) => {
   }
 });
 
-
 const listLimit = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 60,
@@ -466,7 +467,6 @@ const listLimit = rateLimit({
   message: { error: 'Too many list requests. Please wait and try again.' }
 });
 
-// List / search payments (history)
 app.get('/api/payments', listLimit, async (req, res) => {
   try {
     const q = String(req.query.q || '').trim();
@@ -485,7 +485,6 @@ app.get('/api/payments', listLimit, async (req, res) => {
 
     if (q) {
       const digits = q.replace(/\D/g, '');
-      // Search reference, phone, or email using or-filter
       if (q.toUpperCase().startsWith('NPM-') || q.includes('-')) {
         query = query.ilike('reference', `%${q}%`);
       } else if (digits.length >= 4 && digits.length === q.replace(/\s/g, '').length) {
@@ -493,7 +492,6 @@ app.get('/api/payments', listLimit, async (req, res) => {
       } else if (q.includes('@')) {
         query = query.ilike('customer_email', `%${q}%`);
       } else {
-        // Broad search across phone and reference
         query = query.or(`reference.ilike.%${q}%,customer_phone.ilike.%${q}%,customer_email.ilike.%${q}%`);
       }
     }
@@ -522,10 +520,8 @@ app.get('/api/payments', listLimit, async (req, res) => {
   }
 });
 
-// Today's totals (Ghana local day approximated via UTC+0 window; adjust if needed)
 app.get('/api/stats/today', listLimit, async (req, res) => {
   try {
-    // Ghana is UTC+0 — use calendar day in UTC
     const now = new Date();
     const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
     const startIso = start.toISOString();
@@ -584,7 +580,6 @@ app.get('/api/payment/:reference', statusLimit, async (req, res) => {
     let payment = await getPayment(reference);
     if (!payment) return res.status(404).json({ error: 'Payment not found.' });
 
-    // Re-verify pending and previously uncertain requests against Paystack.
     if (payment.status === 'pending' || payment.status === 'verification_mismatch') {
       try {
         await verifyPayment(reference);
@@ -610,6 +605,9 @@ app.get('/api/payment/:reference', statusLimit, async (req, res) => {
   }
 });
 
+// -----------------------------------------------------------------------------
+// Paystack webhook – MoMo collection + Nabeng Invoice subscriptions
+// -----------------------------------------------------------------------------
 app.post('/api/paystack-webhook', async (req, res) => {
   const signature = req.get('x-paystack-signature') || '';
   if (!signature || !req.rawBody || !/^[a-f0-9]{128}$/i.test(signature)) {
@@ -631,16 +629,88 @@ app.post('/api/paystack-webhook', async (req, res) => {
   }
 
   const event = req.body?.event;
-  const reference = req.body?.data?.reference;
+  const data = req.body?.data || {};
+  const reference = data.reference;
+  const metadata = data.metadata || {};
+  const amount = Number(data.amount) || 0;
 
-  // Ignore authenticated event types that this payment flow does not process.
+  console.log('Paystack webhook received:', {
+    event,
+    reference,
+    amount,
+    metadata
+  });
+
   if (!['charge.success', 'charge.failed'].includes(event) || !reference) {
     return res.sendStatus(200);
   }
 
   try {
-    // Acknowledge only after verification and database updates succeed. If the
-    // work fails, a non-2xx response allows Paystack's webhook retry policy to help.
+    // Detect Invoice subscription
+    const isInvoiceByProduct =
+      event === 'charge.success' &&
+      metadata.product === 'nabeng_invoice_subscription';
+
+    const isInvoiceByAmount =
+      event === 'charge.success' &&
+      (amount === 3000 || amount === 31000);
+
+    let isInvoicePayment = isInvoiceByProduct;
+
+    if (!isInvoicePayment && isInvoiceByAmount) {
+      const existingMomo = await getPayment(String(reference)).catch(() => null);
+      if (!existingMomo) {
+        isInvoicePayment = true;
+      }
+    }
+
+    if (isInvoicePayment) {
+      const userId = metadata.user_id;
+      const plan =
+        metadata.plan === 'yearly' || amount === 31000 ? 'yearly' : 'monthly';
+
+      if (!userId) {
+        console.error('Invoice subscription missing user_id', { reference, metadata });
+        return res.sendStatus(400);
+      }
+
+      const expectedAmount = plan === 'yearly' ? 31000 : 3000;
+      if (amount < expectedAmount) {
+        console.error('Invoice subscription amount too low', {
+          reference,
+          amount,
+          expectedAmount
+        });
+        return res.sendStatus(400);
+      }
+
+      const days = plan === 'yearly' ? 365 : 30;
+      const endsAt = new Date();
+      endsAt.setDate(endsAt.getDate() + days);
+
+      // Write to the Invoice Supabase project
+      const { error } = await invoiceDb
+        .from('invoice_profiles')
+        .update({
+          subscription_status: 'active',
+          subscription_plan: plan,
+          subscription_ends_at: endsAt.toISOString(),
+          last_payment_ref: reference,
+          last_payment_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .eq('user_id', userId);
+
+      if (error) {
+        console.error('Failed to unlock Nabeng Invoice subscription:', error.message);
+        return res.sendStatus(500);
+      }
+
+      console.log(`Nabeng Invoice unlocked for user ${userId} (${plan}) – ref ${reference}`);
+      return res.sendStatus(200);
+    }
+
+    // Normal NabengPay MoMo collection
     await verifyPayment(String(reference));
     return res.sendStatus(200);
   } catch (error) {
